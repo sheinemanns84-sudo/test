@@ -1,0 +1,105 @@
+<?xml version="1.0"?>
+<robot name="real_backhoe">
+  <link name="base" />
+
+  <!-- Turret -->
+  <link name="turret">
+    <inertial>
+      <mass value="500" />
+      <inertia ixx="100" iyy="100" izz="100" />
+    </inertial>
+    <visual>
+      <geometry><box size="0.8 0.8 0.4"/></geometry>
+      <origin xyz="0 0 0.2"/>
+      <material name="yellow"><color rgba="0.9 0.8 0.1 1"/></material>
+    </visual>
+  </link>
+  <joint name="turret_joint" type="revolute">
+    <parent link="base"/>
+    <child link="turret"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="1200" lower="-3.14" upper="3.14" velocity="1.2"/>
+  </joint>
+
+  <!-- Boom -->
+  <link name="boom">
+    <inertial>
+      <mass value="700" />
+      <inertia ixx="150" iyy="150" izz="30" />
+    </inertial>
+    <visual>
+      <geometry><box size="0.4 0.4 3"/></geometry>
+      <origin xyz="0 0 1.5"/>
+      <material name="yellow"/>
+    </visual>
+  </link>
+  <joint name="boom_joint" type="revolute">
+    <parent link="turret"/>
+    <child link="boom"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="1200" lower="-0.2" upper="1.1" velocity="1.2"/>
+  </joint>
+
+  <!-- Stick -->
+  <link name="stick">
+    <inertial>
+      <mass value="400" />
+      <inertia ixx="80" iyy="80" izz="20" />
+    </inertial>
+    <visual>
+      <geometry><box size="0.3 0.3 2.5"/></geometry>
+      <origin xyz="0 0 1.25"/>
+      <material name="yellow"/>
+    </visual>
+  </link>
+  <joint name="stick_joint" type="revolute">
+    <parent link="boom"/>
+    <child link="stick"/>
+    <origin xyz="0 0 3" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="800" lower="-0.1" upper="2.4" velocity="1.2"/>
+  </joint>
+
+  <!-- Bucket cylinder (prismatic) -->
+  <link name="bucket_cylinder">
+    <inertial>
+      <mass value="100" />
+      <inertia ixx="5" iyy="5" izz="5" />
+    </inertial>
+    <visual>
+      <geometry><cylinder length="0.6" radius="0.05"/></geometry>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <material name="silver"><color rgba="0.7 0.7 0.7 1"/></material>
+    </visual>
+  </link>
+  <joint name="bucket_cyl_joint" type="prismatic">
+    <parent link="stick"/>
+    <child link="bucket_cylinder"/>
+    <origin xyz="0 0 2.3" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="500" lower="0.0" upper="0.5" velocity="0.5"/>
+  </joint>
+
+  <!-- Bucket -->
+  <link name="bucket">
+    <inertial>
+      <mass value="200" />
+      <inertia ixx="20" iyy="20" izz="10" />
+    </inertial>
+    <visual>
+      <geometry><box size="0.8 0.6 0.6"/></geometry>
+      <origin xyz="0 0 0.3"/>
+      <material name="yellow"/>
+    </visual>
+  </link>
+  <joint name="bucket_joint" type="revolute">
+    <parent link="stick"/>
+    <child link="bucket"/>
+    <origin xyz="0 0 2.4" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit effort="600" lower="-1.2" upper="0.6" velocity="1.5"/>
+    <mimic joint="bucket_cyl_joint" multiplier="-2.5"/>
+  </joint>
+</robot>

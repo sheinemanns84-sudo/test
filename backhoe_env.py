@@ -21,16 +21,16 @@ class BackhoeHydraulicEnv(gym.Env):
         self.render_mode = render
         self.time_step = 1.0 / 240.0
 
-        # turret, boom, stick, bucket cylinder extension
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-        # joint positions (4) + joint velocities (4)
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32
-        )
-
         self.physics_client = None
+        # turret, boom, stick, bucket cylinder extension
         self.arm_joint_indices = [0, 1, 2, 3]
         self.arm_init_positions = [0.0, -0.3, 0.8, 0.2]
+
+        n_joints = len(self.arm_joint_indices)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(n_joints,), dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(n_joints * 2,), dtype=np.float32
+        )
 
         # PD gains
         self.Kp = np.array([220, 250, 230, 180])
@@ -38,6 +38,9 @@ class BackhoeHydraulicEnv(gym.Env):
         # Spring-damper constants for hydraulic approximation
         self.spring_k = np.array([60, 80, 70, 50])
         self.damp_b = np.array([6, 8, 7, 5])
+        # Cylinder areas and lever arms for each joint
+        self.Zylinderflaeche = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
+        self.Hebelarm = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
 
     def _load_environment(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -80,7 +83,8 @@ class BackhoeHydraulicEnv(gym.Env):
         control = self.Kp * error - self.Kd * velocities
         spring = -self.spring_k * error
         damper = -self.damp_b * velocities
-        torque = control + spring + damper
+        hydraulic_gain = self.Zylinderflaeche * self.Hebelarm
+        torque = (control + spring + damper) * hydraulic_gain
         torque = np.clip(torque, -800, 800)
 
         for idx, tau in zip(self.arm_joint_indices, torque):

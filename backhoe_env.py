@@ -32,6 +32,11 @@ class BackhoeHydraulicEnv(gym.Env):
         self.arm_joint_indices = [0, 1, 2, 3]
         self.arm_init_positions = [0.0, -0.3, 0.8, 0.2]
 
+        # Dynamics tuning
+        self.joint_damping = 2.0
+        self.joint_friction = 0.5
+        self.joint_limits = None
+
         # PD gains
         self.Kp = np.array([220, 250, 230, 180])
         self.Kd = np.array([35, 40, 35, 20])
@@ -51,9 +56,18 @@ class BackhoeHydraulicEnv(gym.Env):
             useFixedBase=True,
             flags=p.URDF_USE_SELF_COLLISION,
         )
-
+        limits = []
         for idx, pos in zip(self.arm_joint_indices, self.arm_init_positions):
             p.resetJointState(self.arm_id, idx, targetValue=pos, targetVelocity=0.0)
+            info = p.getJointInfo(self.arm_id, idx)
+            limits.append((info[8], info[9]))
+            p.changeDynamics(
+                self.arm_id,
+                idx,
+                jointDamping=self.joint_damping,
+                jointFriction=self.joint_friction,
+            )
+        self.joint_limits = np.array(limits)
 
     def reset(self, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -74,7 +88,9 @@ class BackhoeHydraulicEnv(gym.Env):
         angles = np.array([s[0] for s in joint_states])
         velocities = np.array([s[1] for s in joint_states])
 
-        desired = angles + action * 0.05  # small incremental target
+        desired = np.clip(
+            angles + action * 0.05, self.joint_limits[:, 0], self.joint_limits[:, 1]
+        )
         error = desired - angles
 
         control = self.Kp * error - self.Kd * velocities
@@ -83,13 +99,32 @@ class BackhoeHydraulicEnv(gym.Env):
         torque = control + spring + damper
         torque = np.clip(torque, -800, 800)
 
-        for idx, tau in zip(self.arm_joint_indices, torque):
-            p.setJointMotorControl2(
-                bodyUniqueId=self.arm_id,
-                jointIndex=idx,
-                controlMode=p.TORQUE_CONTROL,
-                force=float(tau),
-            )
+        for i, (idx, tau) in enumerate(zip(self.arm_joint_indices, torque)):
+            lower, upper = self.joint_limits[i]
+            angle = angles[i]
+            if angle <= lower + 0.01 and tau < 0:
+                p.setJointMotorControl2(
+                    bodyUniqueId=self.arm_id,
+                    jointIndex=idx,
+                    controlMode=p.POSITION_CONTROL,
+                    targetPosition=lower,
+                    force=2000,
+                )
+            elif angle >= upper - 0.01 and tau > 0:
+                p.setJointMotorControl2(
+                    bodyUniqueId=self.arm_id,
+                    jointIndex=idx,
+                    controlMode=p.POSITION_CONTROL,
+                    targetPosition=upper,
+                    force=2000,
+                )
+            else:
+                p.setJointMotorControl2(
+                    bodyUniqueId=self.arm_id,
+                    jointIndex=idx,
+                    controlMode=p.TORQUE_CONTROL,
+                    force=float(tau),
+                )
 
         p.stepSimulation()
         obs = self._get_observation()

@@ -5,14 +5,9 @@ import pybullet as p
 import pybullet_data
 import os
 
-class BackhoeHydraulicEnv(gym.Env):
-    """Simplified backhoe arm with hydraulic-like dynamics.
 
-    This environment models a turret, boom, stick and bucket with a bucket
-    cylinder that is mimicked to the bucket joint.  A PD controller with
-    spring-damper terms approximates hydraulic behavior.  It is *not* a full
-    fluid simulation but captures basic inertial and coupling effects.
-    """
+class BackhoeHydraulicEnv(gym.Env):
+    """Baggerarm-Umgebung mit hydraulikähnlicher Steuerung und Zielhaltung."""
 
     metadata = {"render_modes": ["human"], "render_fps": 60}
 
@@ -21,23 +16,23 @@ class BackhoeHydraulicEnv(gym.Env):
         self.render_mode = render
         self.time_step = 1.0 / 240.0
 
-        # turret, boom, stick, bucket cylinder extension
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-        # joint positions (4) + joint velocities (4)
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32
-        )
-
         self.physics_client = None
-        self.arm_joint_indices = [0, 1, 2, 3]
-        self.arm_init_positions = [0.0, -0.3, 0.8, 0.2]
+        self.arm_id = None
+        self.arm_joint_indices = []
+        self.arm_init_positions = []
 
-        # PD gains
-        self.Kp = np.array([220, 250, 230, 180])
-        self.Kd = np.array([35, 40, 35, 20])
-        # Spring-damper constants for hydraulic approximation
-        self.spring_k = np.array([60, 80, 70, 50])
-        self.damp_b = np.array([6, 8, 7, 5])
+        # Platzhalter bis die Gelenke geladen sind
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32)
+
+        # Reglerparameter für bis zu vier Gelenke (Turret, Boom, Stick, Bucket)
+        self.Kp_full = np.array([220, 250, 230, 180])
+        self.Kd_full = np.array([35, 40, 35, 20])
+        self.spring_k_full = np.array([60, 80, 70, 50])
+        self.damp_b_full = np.array([6, 8, 7, 5])
+
+        self.hold_position = None  # für PD-Halteverhalten
+        self.goal_position = None  # Zielpose für die Belohnungsfunktion
 
     def _load_environment(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -52,36 +47,77 @@ class BackhoeHydraulicEnv(gym.Env):
             flags=p.URDF_USE_SELF_COLLISION,
         )
 
-        for idx, pos in zip(self.arm_joint_indices, self.arm_init_positions):
-            p.resetJointState(self.arm_id, idx, targetValue=pos, targetVelocity=0.0)
-
     def reset(self, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
+
         if self.physics_client is None:
             self.physics_client = p.connect(p.GUI if self.render_mode else p.DIRECT)
             p.setTimeStep(self.time_step)
 
         p.resetSimulation()
+        p.setTimeStep(self.time_step)  # ensure custom step persists after reset
         self._load_environment()
 
+        self.arm_joint_indices = [
+            i for i in range(p.getNumJoints(self.arm_id))
+            if p.getJointInfo(self.arm_id, i)[2] != p.JOINT_FIXED
+        ]
+
+        num_joints = len(self.arm_joint_indices)
+
+        # Realistische Parkposition
+        self.arm_init_positions = [
+            0.0,   # Turret – geradeaus
+            0.8,   # Boom – leicht angehoben
+            -1.0,  # Stick – zurückgezogen
+            -0.5   # Bucket – halb geschlossen
+        ][:num_joints]
+
+        for idx, pos in zip(self.arm_joint_indices, self.arm_init_positions):
+            p.resetJointState(self.arm_id, idx, targetValue=pos, targetVelocity=0.0)
+
+        # Observation/Action-Spaces aktualisieren
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(num_joints,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(2 * num_joints,), dtype=np.float32)
+
+        self.Kp = self.Kp_full[:num_joints]
+        self.Kd = self.Kd_full[:num_joints]
+        self.spring_k = self.spring_k_full[:num_joints]
+        self.damp_b = self.damp_b_full[:num_joints]
+
+        self.hold_position = np.array(self.arm_init_positions, dtype=np.float32)
+        self.goal_position = np.array(self.arm_init_positions, dtype=np.float32)
+
         obs = self._get_observation()
-        info = {}
-        return obs, info
+        return obs, {}
 
     def step(self, action):
         action = np.clip(action, self.action_space.low, self.action_space.high)
+
         joint_states = p.getJointStates(self.arm_id, self.arm_joint_indices)
         angles = np.array([s[0] for s in joint_states])
         velocities = np.array([s[1] for s in joint_states])
 
-        desired = angles + action * 0.05  # small incremental target
-        error = desired - angles
+        deadzone = 0.05
+        is_active = np.abs(action) > deadzone
 
-        control = self.Kp * error - self.Kd * velocities
-        spring = -self.spring_k * error
+        if np.any(is_active):
+            self.hold_position = angles.copy()
+            Pa_in_Bar = 10 ** 7
+            MaxBar = 8 * Pa_in_Bar
+            Zylinderflaeche = np.array([0.2, 0.196, 0.146, 0.140])[:len(action)]
+            Hebelarm = np.array([2.0, 3.6, 1.6, 0.5])[:len(action)]
+
+            Druck = action * MaxBar
+            Kraft = Druck * Zylinderflaeche
+            torque = Kraft * Hebelarm
+        else:
+            error = self.hold_position - angles
+            torque = self.Kp * error - self.Kd * velocities
+
         damper = -self.damp_b * velocities
-        torque = control + spring + damper
-        torque = np.clip(torque, -800, 800)
+        torque += damper
+        torque = np.clip(torque, -80000, 80000)
 
         for idx, tau in zip(self.arm_joint_indices, torque):
             p.setJointMotorControl2(
@@ -92,12 +128,13 @@ class BackhoeHydraulicEnv(gym.Env):
             )
 
         p.stepSimulation()
+
         obs = self._get_observation()
-        reward = -0.05 * np.sum(error ** 2) - 0.01 * np.sum(velocities ** 2)
+        goal_error = angles - self.goal_position
+        reward = -0.05 * np.sum(goal_error ** 2) - 0.01 * np.sum(velocities ** 2)
         terminated = False
         truncated = False
-        info = {}
-        return obs, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, {}
 
     def _get_observation(self):
         joint_states = p.getJointStates(self.arm_id, self.arm_joint_indices)
@@ -106,8 +143,7 @@ class BackhoeHydraulicEnv(gym.Env):
         return np.array(positions + velocities, dtype=np.float32)
 
     def render(self):
-        # GUI handled by pybullet automatically
-        pass
+        pass  # PyBullet GUI läuft automatisch
 
     def close(self):
         if self.physics_client is not None:

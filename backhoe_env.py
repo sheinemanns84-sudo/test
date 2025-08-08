@@ -11,7 +11,9 @@ class BackhoeHydraulicEnv(gym.Env):
     This environment models a turret, boom, stick and bucket with a bucket
     cylinder that is mimicked to the bucket joint.  A PD controller with
     spring-damper terms approximates hydraulic behavior.  It is *not* a full
-    fluid simulation but captures basic inertial and coupling effects.
+    fluid simulation but captures basic inertial and coupling effects.  Gains
+    and torque limits are set high to provide strong passive holding against
+    gravity and external disturbances.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 60}
@@ -32,12 +34,16 @@ class BackhoeHydraulicEnv(gym.Env):
         self.arm_joint_indices = [0, 1, 2, 3]
         self.arm_init_positions = [0.0, -0.3, 0.8, 0.2]
 
-        # PD gains
-        self.Kp = np.array([220, 250, 230, 180])
-        self.Kd = np.array([35, 40, 35, 20])
+        # PD gains tuned for stronger holding behaviour
+        self.Kp = np.array([450, 500, 480, 400])
+        self.Kd = np.array([60, 65, 60, 50])
         # Spring-damper constants for hydraulic approximation
         self.spring_k = np.array([60, 80, 70, 50])
         self.damp_b = np.array([6, 8, 7, 5])
+
+        # target to hold when no command is active
+        self.hold_position = np.array(self.arm_init_positions, dtype=np.float32)
+        self._command_active = False
 
     def _load_environment(self) -> None:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -65,6 +71,8 @@ class BackhoeHydraulicEnv(gym.Env):
         self._load_environment()
 
         obs = self._get_observation()
+        self.hold_position = obs[:4]
+        self._command_active = False
         info = {}
         return obs, info
 
@@ -74,14 +82,23 @@ class BackhoeHydraulicEnv(gym.Env):
         angles = np.array([s[0] for s in joint_states])
         velocities = np.array([s[1] for s in joint_states])
 
-        desired = angles + action * 0.05  # small incremental target
+        threshold = 1e-3
+        command_active = np.any(np.abs(action) > threshold)
+        if not command_active and self._command_active:
+            self.hold_position = angles.copy()
+
+        if command_active:
+            desired = angles + action * 0.05  # small incremental target
+        else:
+            desired = self.hold_position
+
         error = desired - angles
 
         control = self.Kp * error - self.Kd * velocities
         spring = -self.spring_k * error
         damper = -self.damp_b * velocities
         torque = control + spring + damper
-        torque = np.clip(torque, -800, 800)
+        torque = np.clip(torque, -200_000, 200_000)
 
         for idx, tau in zip(self.arm_joint_indices, torque):
             p.setJointMotorControl2(
@@ -92,11 +109,14 @@ class BackhoeHydraulicEnv(gym.Env):
             )
 
         p.stepSimulation()
+
         obs = self._get_observation()
         reward = -0.05 * np.sum(error ** 2) - 0.01 * np.sum(velocities ** 2)
         terminated = False
         truncated = False
         info = {}
+
+        self._command_active = command_active
         return obs, reward, terminated, truncated, info
 
     def _get_observation(self):
